@@ -1,0 +1,164 @@
+name: Coverage
+
+on:
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  tensilelite-coverage:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        coverage_type:
+          - name: tensilelite-unit
+            coverage_file: tensilelite-unit-coverage.xml
+            threshold: 30
+          - name: tensilelite-common
+            coverage_file: tensilelite-common-coverage.xml
+            threshold: 35
+          - name: tensilelite-full
+            coverage_file: tensilelite-full-coverage.xml
+            threshold: 50
+
+    name: ${{ matrix.coverage_type.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        working-directory: projects/hipblaslt/tensilelite
+        run: |
+          python -m pip install --upgrade pip
+          pip install tox
+
+      - name: Run coverage
+        working-directory: projects/hipblaslt/tensilelite
+        run: tox -e coverage
+
+      - name: Install pycobertura
+        run: pip install pycobertura
+
+      - name: Show coverage report
+        working-directory: projects/hipblaslt/tensilelite
+        run: pycobertura show ${{ matrix.coverage_type.coverage_file }}
+
+      - name: Check coverage threshold
+        working-directory: projects/hipblaslt/tensilelite
+        run: |
+          COVERAGE=$(python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('${{ matrix.coverage_type.coverage_file }}')
+          root = tree.getroot()
+          line_rate = float(root.attrib.get('line-rate', 0))
+          coverage_pct = line_rate * 100
+          print(f'{coverage_pct:.2f}')
+          ")
+          echo "Coverage: ${COVERAGE}%"
+          echo "Threshold: ${{ matrix.coverage_type.threshold }}%"
+
+          PASS=$(python -c "print(1 if float('${COVERAGE}') >= ${{ matrix.coverage_type.threshold }} else 0)")
+          if [ "$PASS" -eq 0 ]; then
+            echo "::error::${{ matrix.coverage_type.name }} coverage ${COVERAGE}% is below threshold of ${{ matrix.coverage_type.threshold }}%"
+            exit 1
+          fi
+          echo "${{ matrix.coverage_type.name }} coverage check passed!"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tensilelite-coverage-${{ matrix.coverage_type.name }}
+          path: projects/hipblaslt/tensilelite/${{ matrix.coverage_type.coverage_file }}
+          retention-days: 30
+
+  hipblaslt-coverage:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        coverage_type:
+          - name: hipblaslt-full
+            threshold: 40
+
+    name: ${{ matrix.coverage_type.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Python dependencies
+        working-directory: projects/hipblaslt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tensilelite/requirements.txt
+          pip install lcov_cobertura pycobertura
+
+      - name: Configure CMake
+        working-directory: projects/hipblaslt
+        run: |
+          mkdir -p ./build/release
+          cmake -B ./build/release --preset default:release \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DHIPBLASLT_ENABLE_COVERAGE=ON \
+            -DGPU_TARGETS=gfx950 \
+            -DHIPBLASLT_ENABLE_BLIS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$(pwd)/build/release"
+
+      - name: Build
+        working-directory: projects/hipblaslt
+        run: cmake --build ./build/release -j
+
+      - name: Run coverage tests
+        working-directory: projects/hipblaslt/build/release
+        run: GTEST_FILTER="*" make -j$(nproc) coverage
+
+      - name: Convert LCOV to Cobertura XML
+        working-directory: projects/hipblaslt/build/release
+        run: |
+          lcov_cobertura coverage-report/coverage.info -o hipblaslt-full-coverage.xml
+
+      - name: Show coverage report
+        working-directory: projects/hipblaslt/build/release
+        run: pycobertura show hipblaslt-full-coverage.xml
+
+      - name: Check coverage threshold
+        working-directory: projects/hipblaslt/build/release
+        run: |
+          COVERAGE=$(python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('hipblaslt-full-coverage.xml')
+          root = tree.getroot()
+          line_rate = float(root.attrib.get('line-rate', 0))
+          coverage_pct = line_rate * 100
+          print(f'{coverage_pct:.2f}')
+          ")
+          echo "Coverage: ${COVERAGE}%"
+          echo "Threshold: ${{ matrix.coverage_type.threshold }}%"
+
+          PASS=$(python -c "print(1 if float('${COVERAGE}') >= ${{ matrix.coverage_type.threshold }} else 0)")
+          if [ "$PASS" -eq 0 ]; then
+            echo "::error::${{ matrix.coverage_type.name }} coverage ${COVERAGE}% is below threshold of ${{ matrix.coverage_type.threshold }}%"
+            exit 1
+          fi
+          echo "${{ matrix.coverage_type.name }} coverage check passed!"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ matrix.coverage_type.name }}-coverage
+          path: projects/hipblaslt/build/release/hipblaslt-full-coverage.xml
+          retention-days: 30
